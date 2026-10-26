@@ -32,8 +32,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             binutils bzip2 clang curl file flex g++ gawk gcc gettext git \
-            libncurses-dev libssl-dev patch perl python3 python3-ply python3-pyyaml \
+            libncurses-dev libssl-dev patch perl python3 python3-pip \
             rsync swig unzip wget xxd zlib1g-dev build-essential
+          # PyYAML / ply 的 apt 包名在新镜像上不稳定，用 pip 兜底
+          sudo python3 -m pip install --break-system-packages pyyaml ply || \
+            sudo python3 -m pip install pyyaml ply
 
       - name: Clone OpenWrt source
         run: git clone --depth 1 "${REPO_URL}" -b "${REPO_BRANCH}" openwrt
