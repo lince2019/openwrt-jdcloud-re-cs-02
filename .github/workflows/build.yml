@@ -1,0 +1,81 @@
+name: Build OpenWrt (JDCloud RE-CS-02)
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "OpenWrt source branch"
+        required: false
+        default: "master"
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: ${{ github.event.inputs.branch || 'master' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune -a -f
+          df -hT
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils bzip2 clang curl file flex g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev patch perl python3 python3-ply python3-pyyaml \
+            rsync swig unzip wget xxd zlib1g-dev build-essential
+
+      - name: Clone OpenWrt source
+        run: git clone --depth 1 "${REPO_URL}" -b "${REPO_BRANCH}" openwrt
+
+      - name: Add OpenClash package source
+        run: |
+          git clone --depth 1 https://github.com/vernesong/OpenClash /tmp/openclash
+          cp -r /tmp/openclash/luci-app-openclash openwrt/package/luci-app-openclash
+
+      - name: Apply firmware config
+        run: |
+          cd openwrt
+          cp ../config.seed .config
+          make defconfig
+          grep -E "TARGET_PACKAGE|luci-app-openclash|dnsmasq" .config | head -20
+
+      - name: Download source archives
+        run: |
+          cd openwrt
+          make download -j"$(nproc)"
+          # 清理下载不完整的文件（避免后续编译报校验错）
+          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
+
+      - name: Compile firmware
+        run: |
+          cd openwrt
+          echo "Compiling with $(nproc) threads"
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Organize output
+        if: success()
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages sha256sums config.buildinfo feeds.buildinfo version.buildinfo
+          echo "=== 产物清单 ==="
+          ls -lh
+          sha256sum * > sha256sums.txt || true
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-jdcloud-re-cs-02-${{ github.run_number }}
+          path: openwrt/bin/targets/*/*/*
+          retention-days: 30
+          compression-level: 0
