@@ -1,4 +1,4 @@
-name: Build OpenWrt (JDCloud RE-CS-02)
+name: Build OpenWrt (JDCloud RE-SS-01)
 
 on:
   workflow_dispatch:
@@ -7,6 +7,10 @@ on:
         description: "OpenWrt source branch"
         required: false
         default: "master"
+      no_wifi:
+        description: "Disable WiFi (true = 无 WiFi 版)"
+        required: false
+        default: "true"
 
 env:
   REPO_URL: https://github.com/openwrt/openwrt
@@ -59,6 +63,21 @@ jobs:
           sudo make install
           po2lmo --help 2>&1 | head -1 || true
 
+      - name: Remove WiFi calibration package from device definition
+        if: ${{ github.event.inputs.no_wifi != 'false' }}
+        run: |
+          cd openwrt
+          MK=target/linux/qualcommax/image/ipq60xx.mk
+          echo "=== 修改前 ==="
+          awk '/define Device\/jdcloud_re-ss-01/,/endef/' "$MK"
+          # ipq-wifi-jdcloud_re-ss-01 是 DEVICE_PACKAGES 里的 select 项，无法用 .config 关闭，只能改源码
+          sed -i 's/DEVICE_PACKAGES := ipq-wifi-jdcloud_re-ss-01/DEVICE_PACKAGES :=/' "$MK"
+          echo "=== 修改后 ==="
+          awk '/define Device\/jdcloud_re-ss-01/,/endef/' "$MK"
+          if grep -q "ipq-wifi-jdcloud_re-ss-01" "$MK"; then
+            echo "!! WiFi 包剔除失败，中止"; exit 1
+          fi
+
       - name: Apply firmware config
         run: |
           cd openwrt
@@ -66,6 +85,8 @@ jobs:
           make defconfig
 
       - name: Verify config (fail fast)
+        env:
+          NO_WIFI: ${{ github.event.inputs.no_wifi }}
         run: |
           cd openwrt
           echo "=== 设备 ==="
@@ -81,6 +102,17 @@ jobs:
           done
           if ! grep -qx "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
             echo "!! 设备选择错误"; exit 1
+          fi
+          if [ "$NO_WIFI" != "false" ]; then
+            echo "=== WiFi 应已排除 ==="
+            for p in kmod-ath11k-ahb ath11k-firmware-ipq6018 wpad-basic-mbedtls; do
+              if grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+                echo "  !! $p 仍被选中"; WIFI_BAD=1
+              else
+                echo "  OK   $p 已排除"
+              fi
+            done
+            if [ -n "$WIFI_BAD" ]; then echo "!! WiFi 包未剔除干净，中止编译"; exit 1; fi
           fi
           if [ -n "$MISSING" ]; then echo "!! 有关键包缺失，中止编译"; exit 1; fi
 
@@ -109,7 +141,7 @@ jobs:
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-jdcloud-re-cs-02-${{ github.run_number }}
+          name: openwrt-jdcloud-re-ss-01-${{ github.event.inputs.no_wifi == 'false' && 'withwifi' || 'nowifi' }}-${{ github.run_number }}
           path: openwrt/bin/targets/*/*/*
           retention-days: 30
           compression-level: 0
