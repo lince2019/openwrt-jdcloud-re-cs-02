@@ -18,6 +18,13 @@ CONFIG_PACKAGE_ca-bundle=y
 CONFIG_PACKAGE_ip-full=y
 CONFIG_PACKAGE_ruby=y
 CONFIG_PACKAGE_ruby-yaml=y
+# !! 关键：25.12 分支的 ruby 在 aarch64 上 YJIT 默认为 y
+# YJIT 会通过 PKG_BUILD_DEPENDS:ruby/host RUBY_ENABLE_YJIT:rust/host 去完整编译
+# Rust 1.96.0 工具链（含 LLVM），在 4 核 runner 上要 2~4 小时，直接把 345 分钟预算烧光。
+# master 分支因为有 "depends on BROKEN" 屏蔽，所以不会踩到；25.12 没有该屏蔽。
+# OpenClash 只需要 ruby 解释器跑 yaml 解析，完全不需要 JIT。
+# CONFIG_RUBY_ENABLE_YJIT is not set
+# CONFIG_RUBY_ENABLE_ZJIT is not set
 CONFIG_PACKAGE_kmod-tun=y
 CONFIG_PACKAGE_kmod-inet-diag=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y

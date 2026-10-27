@@ -124,6 +124,21 @@ jobs:
           fi
           echo "=== initramfs 镜像 ==="
           grep -q "CONFIG_TARGET_ROOTFS_INITRAMFS=y" .config && echo "  OK   initramfs 将生成" || echo "  WARN 未启用 initramfs"
+          echo "=== Rust 工具链熔断（25.12 的 ruby YJIT 会拉 rust/host）==="
+          RUST_TRAP=0
+          for s in RUBY_ENABLE_YJIT RUBY_ENABLE_ZJIT; do
+            if grep -qx "CONFIG_$s=y" .config; then
+              echo "  !! CONFIG_$s=y 会在编译期拉完整 Rust 工具链（2~4 小时），中止"; RUST_TRAP=1
+            else
+              echo "  OK   CONFIG_$s 已关闭"
+            fi
+          done
+          if grep -qx "CONFIG_PACKAGE_rust=y" .config; then
+            echo "  !! CONFIG_PACKAGE_rust=y 被选中，中止"; RUST_TRAP=1
+          else
+            echo "  OK   rust 包未选中"
+          fi
+          if [ "$RUST_TRAP" = "1" ]; then echo "!! Rust 熔断触发，中止编译"; exit 1; fi
           if [ -n "$MISSING" ]; then echo "!! 有关键包缺失，中止编译"; exit 1; fi
 
       - name: Download source archives
