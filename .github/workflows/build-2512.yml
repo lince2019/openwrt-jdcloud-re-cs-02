@@ -134,9 +134,77 @@ jobs:
 
       - name: Compile firmware
         run: |
+          set +e
           cd openwrt
-          echo "Compiling with $(nproc) threads"
-          make -j"$(nproc)" || make -j1 V=s
+          echo "=== 环境 ==="
+          nproc; free -m | head -2; df -h . | tail -1
+
+          # 防止 git/curl 在无响应主机上无限等待
+          export GIT_HTTP_LOW_SPEED_LIMIT=1000
+          export GIT_HTTP_LOW_SPEED_TIME=30
+
+          STALL_LIMIT=22   # 连续多少分钟无新增输出判定为卡死
+
+          run_with_watchdog() {
+            tag="$1"; shift
+            log="/tmp/build_${tag}.log"
+            rm -f "$log"
+            "$@" > "$log" 2>&1 &
+            pid=$!
+            last=-1
+            stall=0
+            while kill -0 "$pid" 2>/dev/null; do
+              sleep 60
+              cur=$(wc -c < "$log" 2>/dev/null || echo 0)
+              if [ "$cur" -eq "$last" ]; then stall=$((stall+1)); else stall=0; fi
+              last=$cur
+              left=$((STALL_LIMIT - stall))
+              echo "=== [$tag] $(date -u +%H:%M:%S) 日志 ${cur} 字节 | 停滞 ${stall} 分钟 | 距看门狗 ${left} 分钟 ==="
+              tail -n 2 "$log"
+              if [ "$stall" -ge "$STALL_LIMIT" ]; then
+                echo "!!!! [$tag] 连续 ${stall} 分钟无输出，判定进程卡死，收集现场诊断"
+                echo "---- 最耗 CPU 的 12 个进程 ----"
+                ps -eo pid,ppid,etimes,pcpu,rss,args --sort=-pcpu 2>/dev/null | head -13
+                echo "---- 当前网络连接 ----"
+                (ss -tnp 2>/dev/null || true) | head -15
+                echo "---- 日志末尾 40 行 ----"
+                tail -n 40 "$log"
+                echo "---- 现场诊断结束，杀掉卡住的进程 ----"
+                pkill -9 -P "$pid" 2>/dev/null
+                kill -9 "$pid" 2>/dev/null
+                pkill -9 make 2>/dev/null
+                pkill -9 cc1 2>/dev/null
+                pkill -9 curl 2>/dev/null
+                pkill -9 git 2>/dev/null
+                sleep 3
+                return 99
+              fi
+            done
+            wait "$pid" 2>/dev/null
+            rc=$?
+            return $rc
+          }
+
+          RC=99
+          for attempt in 1 2 3; do
+            echo "==================== 编译尝试 $attempt ===================="
+            if [ "$attempt" -eq 3 ]; then
+              run_with_watchdog "a$attempt" make -j1 V=s; RC=$?
+            else
+              run_with_watchdog "a$attempt" make -j"$(nproc)"; RC=$?
+            fi
+            echo "==== 尝试 $attempt 结束，返回码 $RC ===="
+            if [ "$RC" -eq 0 ]; then break; fi
+            if [ "$RC" -eq 99 ]; then
+              echo "（卡死被判超时，OpenWrt 编译可续跑，下一步从断点继续）"
+            else
+              echo "---- 失败日志末尾 60 行 ----"
+              tail -n 60 "/tmp/build_a$attempt.log"
+            fi
+          done
+          if [ "$RC" -ne 0 ]; then echo "!!!! 三次尝试均未成功"; exit 1; fi
+          echo "==== 编译成功 ===="
+          ls -lh bin/targets/*/*/ | tail -20
 
       - name: Organize output
         if: success()
