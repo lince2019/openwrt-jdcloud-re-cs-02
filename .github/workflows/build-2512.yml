@@ -143,26 +143,40 @@ jobs:
           export GIT_HTTP_LOW_SPEED_LIMIT=1000
           export GIT_HTTP_LOW_SPEED_TIME=30
 
-          STALL_LIMIT=22   # 连续多少分钟无新增输出判定为卡死
+          # 判定卡死必须同时满足：日志连续 N 分钟无增长 + CPU 空闲
+          # 单看日志会误判：make 输出在非终端下是块缓冲，gcc/内核头文件阶段常十几分钟不打印
+          STALL_LIMIT=25
+          RUNNER=""
+          command -v stdbuf >/dev/null 2>&1 && RUNNER="stdbuf -oL -eL"
+
+          cpu_sample() { awk 'NR==1{print $2+$3+$4+$5+$6+$7+$8+$9, $5+$6}' /proc/stat; }
 
           run_with_watchdog() {
             tag="$1"; shift
             log="/tmp/build_${tag}.log"
             rm -f "$log"
-            "$@" > "$log" 2>&1 &
+            echo "[$tag] 启动: $RUNNER $*"
+            $RUNNER "$@" > "$log" 2>&1 &
             pid=$!
             last=-1
             stall=0
+            set -- $(cpu_sample); tot=$1; idl=$2
             while kill -0 "$pid" 2>/dev/null; do
               sleep 60
               cur=$(wc -c < "$log" 2>/dev/null || echo 0)
-              if [ "$cur" -eq "$last" ]; then stall=$((stall+1)); else stall=0; fi
+              set -- $(cpu_sample); tot2=$1; idl2=$2
+              dt=$((tot2 - tot)); di=$((idl2 - idl)); tot=$tot2; idl=$idl2
+              if [ "$dt" -gt 0 ]; then util=$(( (dt - di) * 100 / dt )); else util=0; fi
+              if [ "$cur" -eq "$last" ] && [ "$util" -lt 20 ]; then
+                stall=$((stall + 1))
+              else
+                stall=0
+              fi
               last=$cur
-              left=$((STALL_LIMIT - stall))
-              echo "=== [$tag] $(date -u +%H:%M:%S) 日志 ${cur} 字节 | 停滞 ${stall} 分钟 | 距看门狗 ${left} 分钟 ==="
+              echo "=== [$tag] $(date -u +%H:%M:%S) 日志 ${cur}B | CPU ${util}% | 停滞 ${stall}/${STALL_LIMIT} 分钟 ==="
               tail -n 2 "$log"
               if [ "$stall" -ge "$STALL_LIMIT" ]; then
-                echo "!!!! [$tag] 连续 ${stall} 分钟无输出，判定进程卡死，收集现场诊断"
+                echo "!!!! [$tag] 连续 ${stall} 分钟日志无增长且 CPU 空闲，判定卡死，收集现场诊断"
                 echo "---- 最耗 CPU 的 12 个进程 ----"
                 ps -eo pid,ppid,etimes,pcpu,rss,args --sort=-pcpu 2>/dev/null | head -13
                 echo "---- 当前网络连接 ----"
@@ -182,17 +196,18 @@ jobs:
             done
             wait "$pid" 2>/dev/null
             rc=$?
+            echo "[$tag] 进程退出，返回码 $rc"
             return $rc
           }
 
           RC=99
           for attempt in 1 2 3; do
             echo "==================== 编译尝试 $attempt ===================="
-            if [ "$attempt" -eq 3 ]; then
-              run_with_watchdog "a$attempt" make -j1 V=s; RC=$?
-            else
-              run_with_watchdog "a$attempt" make -j"$(nproc)"; RC=$?
-            fi
+            case "$attempt" in
+              1) run_with_watchdog "a$attempt" make -j"$(nproc)"; RC=$? ;;
+              2) run_with_watchdog "a$attempt" make -j"$(nproc)"; RC=$? ;;
+              *) run_with_watchdog "a$attempt" make -j2 V=s; RC=$? ;;
+            esac
             echo "==== 尝试 $attempt 结束，返回码 $RC ===="
             if [ "$RC" -eq 0 ]; then break; fi
             if [ "$RC" -eq 99 ]; then
