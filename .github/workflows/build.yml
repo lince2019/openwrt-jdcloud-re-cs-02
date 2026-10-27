@@ -41,6 +41,12 @@ jobs:
       - name: Clone OpenWrt source
         run: git clone --depth 1 "${REPO_URL}" -b "${REPO_BRANCH}" openwrt
 
+      - name: Update and install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
       - name: Add OpenClash package source
         run: |
           git clone --depth 1 https://github.com/vernesong/OpenClash /tmp/openclash
@@ -58,7 +64,25 @@ jobs:
           cd openwrt
           cp ../config.seed .config
           make defconfig
-          grep -E "TARGET_PACKAGE|luci-app-openclash|dnsmasq" .config | head -20
+
+      - name: Verify config (fail fast)
+        run: |
+          cd openwrt
+          echo "=== 设备 ==="
+          grep "DEVICE_jdcloud" .config
+          echo "=== 关键包 ==="
+          for p in luci luci-compat luci-app-openclash bash curl ruby ruby-yaml unzip \
+                   kmod-tun kmod-nft-tproxy kmod-inet-diag ip-full dnsmasq-full ca-bundle; do
+            if grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+              echo "  OK   $p"
+            else
+              echo "  MISS $p"; MISSING=1
+            fi
+          done
+          if ! grep -qx "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
+            echo "!! 设备选择错误"; exit 1
+          fi
+          if [ -n "$MISSING" ]; then echo "!! 有关键包缺失，中止编译"; exit 1; fi
 
       - name: Download source archives
         run: |
