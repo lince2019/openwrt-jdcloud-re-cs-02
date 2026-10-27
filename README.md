@@ -84,8 +84,7 @@ openwrt-25.12-jdcloud-re-ss-01-factory-kernel6M.bin
 │   ├── mkfactory.py            由 sysupgrade 包合成 U-Boot 可刷的 factory 镜像
 │   └── i18n/*.lmo              LuCI 简体中文翻译文件
 └── .github/workflows/
-    ├── build-2512.yml          当前使用：openwrt-25.12 稳定分支
-    └── build.yml               早期版本：master 分支（保留备查）
+    └── build-2512.yml          openwrt-25.12 稳定分支
 ```
 
 ### 补丁机制说明
