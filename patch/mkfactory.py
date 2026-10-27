@@ -40,6 +40,191 @@ def pick_member(names, suffix):
     return hits[0]
 
 
+# --- U-Boot 配置名候选 -------------------------------------------------------
+# 该机 U-Boot 的 config_select() 并不是用 configurations/default，
+# 而是拿自己 DTB 里 /config_name 的字符串去 FIT 里逐个匹配；
+# 名字对不上就打印 "Config not available" 并回落 Web 不死界面。
+# 我们无法从 U-Boot 二进制里读出那个名字（它不含内嵌 DTB、也没有 cp03 字样），
+# 因此把常见候选全部补齐——实测其中能被命中，代价只是几十字节。
+EXTRA_CONF = [
+    "config@cp03-c2", "config@cp03-c1_1", "config@cp03-c2_1",
+    "config@cp03-c1_2", "config@cp03-c2_2", "config@cp03-c3",
+    "config@cp03-c4", "config@cp03-c5", "cp03-c2",
+]
+
+
+# --- 极简 FDT 读写（只够克隆 configurations 下的节点）------------------------
+_BEGIN_NODE, _END_NODE, _PROP, _NOP, _END = 1, 2, 3, 4, 9
+
+
+class _Node:
+    def __init__(self, name):
+        self.name = name
+        self.props = []      # [(name, bytes)]
+        self.children = []
+
+    def get(self, name):
+        for k, v in self.props:
+            if k == name:
+                return v
+        return None
+
+    def set(self, name, val):
+        for i, (k, v) in enumerate(self.props):
+            if k == name:
+                self.props[i] = (k, val)
+                return
+        self.props.append((name, val))
+
+    def child(self, name):
+        for c in self.children:
+            if c.name == name:
+                return c
+        return None
+
+
+def _align4(n):
+    return (n + 3) & ~3
+
+
+def _fdt_parse(data):
+    magic, totalsize, off_struct, off_strings, off_rsvmap = struct.unpack_from(">5I", data, 0)
+    if magic != FIT_MAGIC:
+        sys.exit("!! 不是合法 FDT/FIT")
+    version, lastcomp, bootcpu, size_strings, size_struct = struct.unpack_from(">5I", data, 20)
+    rsv, p = [], off_rsvmap
+    while True:
+        addr, size = struct.unpack_from(">QQ", data, p)
+        p += 16
+        if addr == 0 and size == 0:
+            break
+        rsv.append((addr, size))
+    p, root, stack = off_struct, None, []
+    while True:
+        tok, = struct.unpack_from(">I", data, p); p += 4
+        if tok == _BEGIN_NODE:
+            e = data.index(b"\0", p)
+            n = _Node(data[p:e].decode("utf-8", "surrogateescape"))
+            p = _align4(e + 1)
+            if root is None:
+                root = n
+            else:
+                stack[-1].children.append(n)
+            stack.append(n)
+        elif tok == _END_NODE:
+            stack.pop()
+        elif tok == _PROP:
+            ln, nameoff = struct.unpack_from(">II", data, p); p += 8
+            s = off_strings + nameoff
+            stack[-1].props.append((data[s:data.index(b"\0", s)].decode("utf-8", "surrogateescape"),
+                                    data[p:p + ln]))
+            p = _align4(p + ln)
+        elif tok == _NOP:
+            pass
+        elif tok == _END:
+            break
+        else:
+            sys.exit("!! FDT 结构解析失败")
+    return dict(version=version, lastcomp=lastcomp, bootcpu=bootcpu, rsv=rsv), root
+
+
+def _fdt_build(hdr, root):
+    strings, sindex = bytearray(), {}
+
+    def s_off(name):
+        b = name.encode("utf-8")
+        if b in sindex:
+            return sindex[b]
+        off = len(strings)
+        strings.extend(b + b"\0")
+        sindex[b] = off
+        return off
+
+    body = bytearray()
+
+    def emit(n):
+        body.extend(struct.pack(">I", _BEGIN_NODE))
+        body.extend(n.name.encode("utf-8") + b"\0")
+        body.extend(b"\0" * (_align4(len(body)) - len(body)))
+        for k, v in n.props:
+            body.extend(struct.pack(">III", _PROP, len(v), s_off(k)))
+            body.extend(v)
+            body.extend(b"\0" * (_align4(len(body)) - len(body)))
+        for c in n.children:
+            emit(c)
+        body.extend(struct.pack(">I", _END_NODE))
+
+    emit(root)
+    body.extend(struct.pack(">I", _END))
+    rsv = b"".join(struct.pack(">QQ", a, s) for a, s in hdr["rsv"]) + b"\0" * 16
+    off_rsvmap = 40
+    off_struct = off_rsvmap + len(rsv)
+    off_strings = off_struct + len(body)
+    out = bytearray()
+    out.extend(struct.pack(">10I", FIT_MAGIC, off_strings + len(strings), off_struct,
+                           off_strings, off_rsvmap, hdr["version"], hdr["lastcomp"],
+                           hdr["bootcpu"], len(strings), len(body)))
+    out.extend(rsv)
+    out.extend(body)
+    out.extend(strings)
+    return bytes(out)
+
+
+def _clone(n, newname):
+    c = _Node(newname)
+    c.props = list(n.props)
+    for ch in n.children:
+        c.children.append(_clone(ch, ch.name))
+    return c
+
+
+def add_config_nodes(fit):
+    """补齐 U-Boot 可能查找的 config 名字，返回新的 FIT。"""
+    hdr, root = _fdt_parse(fit)
+    conf = root.child("configurations")
+    if conf is None:
+        sys.exit("!! FIT 内没有 configurations 节点")
+    existing = [c.name for c in conf.children]
+    base = conf.children[0]
+    added = []
+    for name in EXTRA_CONF:
+        if name in existing:
+            continue
+        n = _clone(base, name)
+        n.set("description", ("OpenWrt jdcloud_re-ss-01 (%s)" % name).encode() + b"\0")
+        conf.children.append(n)
+        added.append(name)
+    new_fit = _fdt_build(hdr, root)
+    print("  config 节点: %d 个 (%s)"
+          % (len(conf.children), "新增 " + ",".join(added) if added else "无变化"))
+    _verify_hashes(new_fit)
+    return new_fit
+
+
+def _verify_hashes(fit):
+    """FIT 内各 image 的 crc32/sha1 必须与 payload 一致（改动结构不能破坏校验）。"""
+    import zlib
+    hdr, root = _fdt_parse(fit)
+    for img in root.child("images").children:
+        payload = img.get("data")
+        for ch in img.children:
+            algo = ch.get("algo")
+            if algo is None:
+                continue
+            algo = algo.rstrip(b"\0").decode()
+            if algo == "crc32":
+                got = struct.pack(">I", zlib.crc32(payload) & 0xffffffff)
+            elif algo == "sha1":
+                got = hashlib.sha1(payload).digest()
+            elif algo == "sha256":
+                got = hashlib.sha256(payload).digest()
+            else:
+                continue
+            if got != ch.get("value"):
+                sys.exit("!! %s 的 %s 校验失败" % (img.name, algo))
+    print("  FIT 内部校验: OK")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--bin", required=True, help="bin/targets/<target>/<subtarget> 目录")
@@ -62,18 +247,16 @@ def main():
 
     print("  kernel %d 字节 (%s)" % (len(kernel), k_name))
     print("  root   %d 字节 (%s)" % (len(root), r_name))
-    # 中文界面是否随镜像下发（config.seed 里的 luci-i18n-* 会被 defconfig 丢掉，
-    # 实际上是靠 files/ 机制把 .lmo 打进根文件系统）
-    zh = sorted(set(
-        n.split("/")[-1] for n in [b"base.zh-cn.lmo", b"firewall.zh-cn.lmo",
-                                   b"package-manager.zh-cn.lmo"]
-        if n in root
-    ))
-    print("  中文界面: %s" % ("已内置 " + ",".join(zh) if zh else "缺失，刷机后需另行 apk add"))
+    # 中文由 patch/i18n/*.lmo 经 files/ 机制打进根文件系统（config.seed 里的
+    # luci-i18n-* 会被 defconfig 丢掉）。注意：这里**不能**用"搜字节"的方式自检——
+    # squashfs 的文件名存在压缩过的元数据块里，明文搜索必然搜不到、会误报缺失。
+    # 如需确认请解包验证：unsquashfs -ll 或 python 的 PySquashfsImage。
 
     # --- 内核段 ---
     if len(kernel) < 4 or struct.unpack_from(">I", kernel, 0)[0] != FIT_MAGIC:
         sys.exit("!! kernel 成员不是 FIT 镜像")
+    # 补齐 U-Boot 可能查找的 config 名字；只改结构不改 payload，hash 不受影响
+    kernel = add_config_nodes(kernel)
     if len(kernel) > KERNEL_ZONE:
         sys.exit("!! kernel %d 超过 %d 字节的 kernel 区" % (len(kernel), KERNEL_ZONE))
     kern_zone = kernel + b"\xff" * (KERNEL_ZONE - len(kernel))
