@@ -160,10 +160,16 @@ jobs:
             pid=$!
             last=-1
             stall=0
+            lastipk=-1
+            noprog=0
+            elbow=0
             set -- $(cpu_sample); tot=$1; idl=$2
             while kill -0 "$pid" 2>/dev/null; do
               sleep 60
+              elbow=$((elbow + 1))
               cur=$(wc -c < "$log" 2>/dev/null || echo 0)
+              # 真实进度指标：已产出的包数量（不受 stdout 块缓冲影响；25.x 可能是 apk，统一统计）
+              ipk=$(find bin/packages -maxdepth 4 -type f \( -name '*.ipk' -o -name '*.apk' \) 2>/dev/null | wc -l)
               set -- $(cpu_sample); tot2=$1; idl2=$2
               dt=$((tot2 - tot)); di=$((idl2 - idl)); tot=$tot2; idl=$idl2
               if [ "$dt" -gt 0 ]; then util=$(( (dt - di) * 100 / dt )); else util=0; fi
@@ -172,11 +178,26 @@ jobs:
               else
                 stall=0
               fi
-              last=$cur
-              echo "=== [$tag] $(date -u +%H:%M:%S) 日志 ${cur}B | CPU ${util}% | 停滞 ${stall}/${STALL_LIMIT} 分钟 ==="
+              # 自旋嫌疑：CPU 忙但日志与包数量双双不动
+              # 注意 toolchain/kernel 阶段本身几十分钟且不产包，故 pkg<20 时不解锁该判据，避免误杀
+              if [ "$cur" -eq "$last" ] && [ "$ipk" -eq "$lastipk" ] && [ "$ipk" -ge 20 ]; then
+                noprog=$((noprog + 1))
+              else
+                noprog=0
+              fi
+              last=$cur; lastipk=$ipk
+              echo "=== [$tag] $(date -u +%H:%M:%S) 第${elbow}分 | 日志 ${cur}B | ipk ${ipk} | CPU ${util}% | 停滞 ${stall}/${STALL_LIMIT} | 零进展 ${noprog}/40 ==="
+              # 正在跑什么：把被块缓冲吞掉的真相打出来
+              echo "    top: $(ps -eo pcpu,etimes,args --sort=-pcpu 2>/dev/null | sed -n '2p' | cut -c1-150)"
               tail -n 2 "$log"
-              if [ "$stall" -ge "$STALL_LIMIT" ]; then
-                echo "!!!! [$tag] 连续 ${stall} 分钟日志无增长且 CPU 空闲，判定卡死，收集现场诊断"
+              if [ "$stall" -ge "$STALL_LIMIT" ] || [ "$noprog" -ge 40 ] || [ "$elbow" -ge 160 ]; then
+                if [ "$noprog" -ge 40 ]; then
+                  echo "!!!! [$tag] 连续 ${noprog} 分钟 CPU 忙但 ipk 数量零增长，判定病态自旋（非正常编译）"
+                elif [ "$elbow" -ge 160 ]; then
+                  echo "!!!! [$tag] 单轮已跑 ${elbow} 分钟，超过单轮上限 160 分钟，主动止损"
+                else
+                  echo "!!!! [$tag] 连续 ${stall} 分钟日志无增长且 CPU 空闲，判定卡死"
+                fi
                 echo "---- 最耗 CPU 的 12 个进程 ----"
                 ps -eo pid,ppid,etimes,pcpu,rss,args --sort=-pcpu 2>/dev/null | head -13
                 echo "---- 当前网络连接 ----"
