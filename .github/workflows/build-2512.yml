@@ -1,0 +1,156 @@
+name: Build OpenWrt 25.12 stable (JDCloud RE-SS-01, no WiFi)
+
+# 基于官方稳定分支 openwrt-25.12，回移主线已有的 RE-SS-01 设备支持
+# （该设备主线支持 2026 年才合入，未进入 25.12 分支；此处移植的是官方当年 ESS 网络栈版本）
+
+on:
+  workflow_dispatch:
+    inputs:
+      no_wifi:
+        description: "Disable WiFi (true = 无 WiFi 版)"
+        required: false
+        default: "true"
+
+env:
+  REPO_URL: https://github.com/openwrt/openwrt
+  REPO_BRANCH: openwrt-25.12
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          sudo docker image prune -a -f
+          df -hT
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            binutils bzip2 clang curl file flex g++ gawk gcc gettext git \
+            libncurses-dev libssl-dev patch perl python3 python3-pip \
+            rsync swig unzip wget xxd zlib1g-dev build-essential
+          sudo python3 -m pip install --break-system-packages pyyaml ply || \
+            sudo python3 -m pip install pyyaml ply
+
+      - name: Clone OpenWrt 25.12 stable
+        run: |
+          git clone --depth 1 "${REPO_URL}" -b "${REPO_BRANCH}" openwrt
+          cd openwrt
+          echo "=== 源码版本 ==="
+          git log --oneline -1
+          cat version 2>/dev/null || true
+
+      - name: Update and install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Add OpenClash package source
+        run: |
+          git clone --depth 1 https://github.com/vernesong/OpenClash /tmp/openclash
+          cp -r /tmp/openclash/luci-app-openclash openwrt/package/luci-app-openclash
+
+      - name: Build po2lmo translation tool (required by OpenClash)
+        run: |
+          cd openwrt/package/luci-app-openclash/tools/po2lmo
+          make
+          sudo make install
+          po2lmo --help 2>&1 | head -1 || true
+
+      - name: Install RE-SS-01 device support (DTS + image definition)
+        run: |
+          cd openwrt
+          DTS_DIR=target/linux/qualcommax/files/arch/arm64/boot/dts/qcom
+          MK=target/linux/qualcommax/image/ipq60xx.mk
+
+          test -d "$DTS_DIR" || { echo "!! DTS 目录不存在，分支结构可能已变"; exit 1; }
+
+          # 1) 设备树
+          cp ../patch/ipq6000-re-ss-01.dts "$DTS_DIR/"
+          echo "=== DTS 已安装 ==="
+          head -8 "$DTS_DIR/ipq6000-re-ss-01.dts"
+          grep -q 'jdcloud,re-ss-01' "$DTS_DIR/ipq6000-re-ss-01.dts" || { echo "!! DTS compatible 异常"; exit 1; }
+
+          # 2) 镜像定义（追加到 ipq60xx.mk 末尾，include 处会用到）
+          cat ../patch/device.mk >> "$MK"
+          echo "=== 设备定义已追加 ==="
+          awk '/define Device\/jdcloud_re-ss-01/,/TARGET_DEVICES \+= jdcloud_re-ss-01/' "$MK"
+          grep -q "TARGET_DEVICES += jdcloud_re-ss-01" "$MK" || { echo "!! 设备定义写入失败"; exit 1; }
+
+      - name: Apply firmware config
+        run: |
+          cd openwrt
+          cp ../config.seed .config
+          make defconfig
+
+      - name: Verify config (fail fast)
+        env:
+          NO_WIFI: ${{ github.event.inputs.no_wifi }}
+        run: |
+          cd openwrt
+          echo "=== 设备 ==="
+          grep "DEVICE_jdcloud" .config
+          echo "=== 关键包 ==="
+          for p in luci luci-compat luci-app-openclash bash curl ruby ruby-yaml unzip \
+                   kmod-tun kmod-nft-tproxy kmod-inet-diag ip-full dnsmasq-full ca-bundle; do
+            if grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+              echo "  OK   $p"
+            else
+              echo "  MISS $p"; MISSING=1
+            fi
+          done
+          if ! grep -qx "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y" .config; then
+            echo "!! 设备选择错误"; exit 1
+          fi
+          if [ "$NO_WIFI" != "false" ]; then
+            echo "=== WiFi 应已排除 ==="
+            for p in kmod-ath11k-ahb ath11k-firmware-ipq6018 wpad-basic-mbedtls; do
+              if grep -qx "CONFIG_PACKAGE_$p=y" .config; then
+                echo "  !! $p 仍被选中"; WIFI_BAD=1
+              else
+                echo "  OK   $p 已排除"
+              fi
+            done
+            if [ -n "$WIFI_BAD" ]; then echo "!! WiFi 包未剔除干净，中止编译"; exit 1; fi
+          fi
+          echo "=== initramfs 镜像 ==="
+          grep -q "CONFIG_TARGET_ROOTFS_INITRAMFS=y" .config && echo "  OK   initramfs 将生成" || echo "  WARN 未启用 initramfs"
+          if [ -n "$MISSING" ]; then echo "!! 有关键包缺失，中止编译"; exit 1; fi
+
+      - name: Download source archives
+        run: |
+          cd openwrt
+          make download -j"$(nproc)"
+          find dl -size -1024c -exec rm -f {} \; 2>/dev/null || true
+
+      - name: Compile firmware
+        run: |
+          cd openwrt
+          echo "Compiling with $(nproc) threads"
+          make -j"$(nproc)" || make -j1 V=s
+
+      - name: Organize output
+        if: success()
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages sha256sums config.buildinfo feeds.buildinfo version.buildinfo
+          echo "=== 产物清单 ==="
+          ls -lh
+          sha256sum * > sha256sums.txt || true
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-25.12-jdcloud-re-ss-01-nowifi-${{ github.run_number }}
+          path: openwrt/bin/targets/*/*/*
+          retention-days: 30
+          compression-level: 0
