@@ -2,11 +2,17 @@ CONFIG_TARGET_qualcommax=y
 CONFIG_TARGET_qualcommax_ipq60xx=y
 CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_re-ss-01=y
 
-# ---- LuCI 基础 + 中文 ----
+# ---- LuCI 基础 ----
 CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-compat=y
+
+# ---- LuCI 中文 ----
+# 注意：下面这些 luci-i18n-* 会在 make defconfig 阶段被静默丢弃（实测产物无任何 i18n 包），
+# 保留在此仅为兼容；真正的中文界面由 patch/i18n/*.lmo 经 buildroot 顶层 files/ 打进根文件系统，
+# 见 workflow 中 "简体中文界面" 一节。
 CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
 CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
-CONFIG_PACKAGE_luci-compat=y
+CONFIG_PACKAGE_luci-i18n-package-manager-zh-cn=y
 
 # ---- OpenClash（源码随固件编译）----
 CONFIG_PACKAGE_luci-app-openclash=y

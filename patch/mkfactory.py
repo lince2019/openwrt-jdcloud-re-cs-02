@@ -62,6 +62,14 @@ def main():
 
     print("  kernel %d 字节 (%s)" % (len(kernel), k_name))
     print("  root   %d 字节 (%s)" % (len(root), r_name))
+    # 中文界面是否随镜像下发（config.seed 里的 luci-i18n-* 会被 defconfig 丢掉，
+    # 实际上是靠 files/ 机制把 .lmo 打进根文件系统）
+    zh = sorted(set(
+        n.split("/")[-1] for n in [b"base.zh-cn.lmo", b"firewall.zh-cn.lmo",
+                                   b"package-manager.zh-cn.lmo"]
+        if n in root
+    ))
+    print("  中文界面: %s" % ("已内置 " + ",".join(zh) if zh else "缺失，刷机后需另行 apk add"))
 
     # --- 内核段 ---
     if len(kernel) < 4 or struct.unpack_from(">I", kernel, 0)[0] != FIT_MAGIC:
