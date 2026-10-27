@@ -297,13 +297,18 @@ jobs:
         if: success()
         run: |
           cd openwrt/bin/targets/*/*
-          python3 ../../../../patch/mkfactory.py --bin .
+          # 注意用绝对路径：从 openwrt/bin/targets/<target>/<subtarget> 往上要 5 级才到仓库根，
+          # 写 4 级会指到 openwrt/patch/ 去（第一次跑就是这么挂的）
+          python3 "${GITHUB_WORKSPACE}/patch/mkfactory.py" --bin .
           echo "=== 最终产物 ==="
           ls -lh
           for f in *; do [ "$f" = sha256sums.txt ] && continue; sha256sum "$f"; done > sha256sums.txt
           cat sha256sums.txt
 
       - name: Upload firmware artifact
+        # 用 !cancelled() 而不是 success()：后处理步骤（比如 factory 镜像合成）万一失败，
+        # 也要把已经编译好的原始镜像传上来，否则一小时白跑、什么都拿不到。
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-25.12-jdcloud-re-ss-01-nowifi-${{ github.run_number }}
