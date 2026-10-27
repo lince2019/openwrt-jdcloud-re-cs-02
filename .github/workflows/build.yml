@@ -46,6 +46,13 @@ jobs:
           git clone --depth 1 https://github.com/vernesong/OpenClash /tmp/openclash
           cp -r /tmp/openclash/luci-app-openclash openwrt/package/luci-app-openclash
 
+      - name: Build po2lmo translation tool (required by OpenClash)
+        run: |
+          cd openwrt/package/luci-app-openclash/tools/po2lmo
+          make
+          sudo make install
+          po2lmo --help 2>&1 | head -1 || true
+
       - name: Apply firmware config
         run: |
           cd openwrt
